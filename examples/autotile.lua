@@ -3,9 +3,8 @@
 -- Automatically picks a layout based on how many windows are on the
 -- active tag:
 --
---   1 window  → monocle   (full-screen, nothing wasted)
---   2 windows → tile      (master on the left, one slave on the right)
---   3+windows → scroller  (horizontal strip you can scroll through)
+--   1-2 windows → tile     (master/slave)
+--   3+ windows  → scroller (horizontal strip you can scroll through)
 --
 -- Configuration:
 -- The indices below correspond to the position of each layout name in
@@ -18,12 +17,24 @@
 --   4  deck           10  tgmix
 --   5  center_tile
 --
+-- If you have reordered or removed layouts in your MangoWM config,
+-- adjust the values below to match your actual indices.
 
-local LAYOUT_MONOCLE = 2
 local LAYOUT_TILE = 0
 local LAYOUT_SCROLLER = 1
 
 local last_count = -1
+local last_active_tag = nil
+
+local desired_layout = nil
+
+local function layout_for(count)
+	if count <= 2 then
+		return LAYOUT_TILE
+	else
+		return LAYOUT_SCROLLER
+	end
+end
 
 mplug.add_listener(function(event, state)
 	local relevant = event.type == "OutputTag" -- tag state / client count changed
@@ -47,11 +58,6 @@ mplug.add_listener(function(event, state)
 	end
 	last_count = total
 
-	if total <= 1 then
-		mplug.dispatch("set_layout " .. LAYOUT_MONOCLE)
-	elseif total == 2 then
-		mplug.dispatch("set_layout " .. LAYOUT_TILE)
-	else
-		mplug.dispatch("set_layout " .. LAYOUT_SCROLLER)
-	end
+	desired_layout = layout_for(total)
+	mplug.dispatch("set_layout " .. desired_layout)
 end)
