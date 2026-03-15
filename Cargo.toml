@@ -1,0 +1,21 @@
+[package]
+name = "mplug"
+version = "0.1.0"
+description = "Manifest-driven plugin manager for MangoWM / MangoWC Wayland compositors"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.4", features = ["derive"] }
+comfy-table = "7"
+console = "0.15"
+dirs = "5.0"
+indicatif = "0.17"
+mlua = { version = "0.9", features = ["lua54", "vendored"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+url = "2.5.8"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["staging", "client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-scanner = "0.31"
