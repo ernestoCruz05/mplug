@@ -74,6 +74,20 @@ cargo build --release
 sudo cp target/release/mplug /usr/local/bin/
 ```
 
+Alternatively, you can use `cargo install` which handles the binary placement automatically:
+
+```
+git clone https://github.com/ernestoCruz05/mplug.git
+cd mplug
+cargo install --path .
+``` 
+This installs the `mplug` binary to `~/.cargo/bin/`. Ensure this directory is in your `PATH`:
+```
+export PATH="HOME/.cargo/bin:HOME/.cargo/bin:HOME/.cargo/bin:PATH"
+```
+Add this line to your `~/.bashrc`, `~/.zshrc`, or shell config to make it permanent. This method is recommended for NixOS and other systems where writing to `/usr/local/bin` is restricted.
+
+
 ---
 
 ## Getting Started
