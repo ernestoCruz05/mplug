@@ -2,13 +2,170 @@ use crate::config;
 use crate::event::{WaylandEvent, WaylandRequest};
 use crate::manifest::load_manifest;
 use mlua::{Lua, Result as LuaResult};
+use std::cell::{Cell, RefCell};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+struct TimerEntry {
+    deadline: Instant,
+    id: u64,
+    interval: Option<Duration>,
+    cb_key: mlua::RegistryKey,
+}
+
+impl PartialEq for TimerEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.deadline == other.deadline && self.id == other.id
+    }
+}
+impl Eq for TimerEntry {}
+impl PartialOrd for TimerEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for TimerEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.deadline.cmp(&other.deadline).then(self.id.cmp(&other.id))
+    }
+}
+
+struct TimerState {
+    heap: BinaryHeap<Reverse<TimerEntry>>,
+    cancelled: HashSet<u64>,
+    next_id: u64,
+}
+
+impl TimerState {
+    fn new() -> Self {
+        Self {
+            heap: BinaryHeap::new(),
+            cancelled: HashSet::new(),
+            next_id: 0,
+        }
+    }
+
+    fn add(&mut self, delay_ms: u64, interval_ms: Option<u64>, cb_key: mlua::RegistryKey) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.heap.push(Reverse(TimerEntry {
+            deadline: Instant::now() + Duration::from_millis(delay_ms),
+            id,
+            interval: interval_ms.map(Duration::from_millis),
+            cb_key,
+        }));
+        id
+    }
+
+    fn next_timeout(&self) -> Duration {
+        match self.heap.peek() {
+            Some(Reverse(entry)) => {
+                let now = Instant::now();
+                if entry.deadline <= now {
+                    Duration::ZERO
+                } else {
+                    entry.deadline - now
+                }
+            }
+            None => Duration::from_secs(3600),
+        }
+    }
+
+    fn fire_expired(&mut self, lua: &mlua::Lua) {
+        let now = Instant::now();
+        loop {
+            match self.heap.peek() {
+                Some(Reverse(entry)) if entry.deadline <= now => {}
+                _ => break,
+            }
+            let Reverse(entry) = self.heap.pop().unwrap();
+            if self.cancelled.contains(&entry.id) {
+                let _ = lua.remove_registry_value(entry.cb_key);
+                continue;
+            }
+            if let Ok(f) = lua.registry_value::<mlua::Function>(&entry.cb_key) {
+                if let Err(e) = f.call::<(), ()>(()) {
+                    eprintln!("mplug: timer callback error: {e}");
+                }
+            }
+            if let Some(interval) = entry.interval {
+                self.heap.push(Reverse(TimerEntry {
+                    deadline: entry.deadline + interval,
+                    id: entry.id,
+                    interval: entry.interval,
+                    cb_key: entry.cb_key,
+                }));
+            } else {
+                let _ = lua.remove_registry_value(entry.cb_key);
+            }
+        }
+    }
+}
 
 pub fn run_lua(rx: Receiver<WaylandEvent>, tx: Sender<WaylandRequest>) -> LuaResult<()> {
     let lua = Lua::new();
     let mplug_table = lua.create_table()?;
+
+    let timers = Rc::new(RefCell::new(TimerState::new()));
+
+    let (proc_event_tx, proc_event_rx) = std::sync::mpsc::channel::<WaylandEvent>();
+
+    let proc_next_id = Rc::new(Cell::new(0u64));
+
+    let proc_callbacks: Rc<
+        RefCell<
+            std::collections::HashMap<
+                u64,
+                (Option<mlua::RegistryKey>, Option<mlua::RegistryKey>),
+            >,
+        >,
+    > = Rc::new(RefCell::new(std::collections::HashMap::new()));
+
+    let t_every = Rc::clone(&timers);
+    let every_fn = lua.create_function(move |lua_ctx, (ms, cb): (u64, mlua::Function)| {
+        let cb_key = lua_ctx.create_registry_value(cb)?;
+        let id = t_every.borrow_mut().add(ms, Some(ms), cb_key);
+
+        let handle = lua_ctx.create_table()?;
+        handle.set("id", id)?;
+
+        let t_cancel = Rc::clone(&t_every);
+        let cancel_fn = lua_ctx.create_function(move |_, ()| {
+            t_cancel.borrow_mut().cancelled.insert(id);
+            Ok(())
+        })?;
+        handle.set("cancel", cancel_fn)?;
+
+        Ok(handle)
+    })?;
+    mplug_table.set("every", every_fn)?;
+
+    let t_after = Rc::clone(&timers);
+    let after_fn = lua.create_function(move |lua_ctx, (ms, cb): (u64, mlua::Function)| {
+        let cb_key = lua_ctx.create_registry_value(cb)?;
+        let id = t_after.borrow_mut().add(ms, None, cb_key);
+
+        let handle = lua_ctx.create_table()?;
+        handle.set("id", id)?;
+
+        let t_cancel = Rc::clone(&t_after);
+        let cancel_fn = lua_ctx.create_function(move |_, ()| {
+            t_cancel.borrow_mut().cancelled.insert(id);
+            Ok(())
+        })?;
+        handle.set("cancel", cancel_fn)?;
+
+        Ok(handle)
+    })?;
+    mplug_table.set("after", after_fn)?;
 
     let listeners_table = lua.create_table()?;
     mplug_table.set("__listeners", listeners_table.clone())?;
@@ -155,6 +312,104 @@ pub fn run_lua(rx: Receiver<WaylandEvent>, tx: Sender<WaylandRequest>) -> LuaRes
     })?;
     mplug_table.set("set_client_tags", set_client_tags_fn)?;
 
+    let proc_event_tx_spawn = proc_event_tx.clone();
+    let proc_id_rc = Rc::clone(&proc_next_id);
+    let proc_cbs_spawn = Rc::clone(&proc_callbacks);
+    let spawn_fn = lua.create_function(
+        move |lua_ctx, (cmd, opts): (String, Option<mlua::Table>)| {
+            let id = proc_id_rc.get();
+            proc_id_rc.set(id + 1);
+
+            let (args_vec, on_exit_key, on_stdout_key) = if let Some(opts) = opts {
+                let args_raw: Vec<String> = opts
+                    .get::<_, Option<mlua::Table>>("args")
+                    .ok()
+                    .flatten()
+                    .map(|t| t.sequence_values::<String>().flatten().collect())
+                    .unwrap_or_default();
+                let on_exit_key = opts
+                    .get::<_, Option<mlua::Function>>("on_exit")
+                    .ok()
+                    .flatten()
+                    .map(|f| lua_ctx.create_registry_value(f))
+                    .transpose()?;
+                let on_stdout_key = opts
+                    .get::<_, Option<mlua::Function>>("on_stdout")
+                    .ok()
+                    .flatten()
+                    .map(|f| lua_ctx.create_registry_value(f))
+                    .transpose()?;
+                (args_raw, on_exit_key, on_stdout_key)
+            } else {
+                (vec![], None, None)
+            };
+
+            proc_cbs_spawn
+                .borrow_mut()
+                .insert(id, (on_exit_key, on_stdout_key));
+
+            let child = Command::new(&cmd)
+                .args(&args_vec)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| {
+                    mlua::Error::RuntimeError(format!("mplug.spawn failed: {e}"))
+                })?;
+
+            let pid = child.id();
+            let child_arc = Arc::new(Mutex::new(child));
+
+            let stdout = child_arc.lock().unwrap().stdout.take();
+            if let Some(stdout) = stdout {
+                let tx_out = proc_event_tx_spawn.clone();
+                std::thread::spawn(move || {
+                    let reader = BufReader::new(stdout);
+                    for line in reader.lines().flatten() {
+                        let _ = tx_out
+                            .send(crate::event::WaylandEvent::ProcessStdout { id, line });
+                    }
+                });
+            }
+
+            let tx_exit = proc_event_tx_spawn.clone();
+            let child_arc_exit = Arc::clone(&child_arc);
+            std::thread::spawn(move || loop {
+                let status = child_arc_exit.lock().unwrap().try_wait();
+                match status {
+                    Ok(Some(s)) => {
+                        let _ = tx_exit.send(crate::event::WaylandEvent::ProcessExited {
+                            id,
+                            exit_code: s.code(),
+                        });
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                    Err(_) => break,
+                }
+            });
+
+            let handle = lua_ctx.create_table()?;
+            handle.set("id", id)?;
+            handle.set("pid", pid)?;
+
+            let child_arc_kill = Arc::clone(&child_arc);
+            let kill_fn = lua_ctx.create_function(move |_, ()| {
+                let child_pid = child_arc_kill.lock().unwrap().id();
+                let nix_pid = nix::unistd::Pid::from_raw(child_pid as i32);
+                let _ = nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGTERM);
+                Ok(())
+            })?;
+            handle.set("kill", kill_fn)?;
+
+            let pid_fn = lua_ctx.create_function(move |_, ()| Ok(pid))?;
+            handle.set("pid_fn", pid_fn)?;
+
+            Ok(handle)
+        },
+    )?;
+    mplug_table.set("spawn", spawn_fn)?;
+
     let exec_fn = lua.create_function(|_, cmd: String| {
         let output = std::process::Command::new("sh")
             .arg("-c")
@@ -294,7 +549,16 @@ pub fn run_lua(rx: Receiver<WaylandEvent>, tx: Sender<WaylandRequest>) -> LuaRes
     let mut output_head_states: std::collections::HashMap<u32, crate::event::HeadInfo> =
         std::collections::HashMap::new();
 
-    while let Ok(event) = rx.recv() {
+    loop {
+        let timeout = timers.borrow().next_timeout();
+        let event = match rx.recv_timeout(timeout) {
+            Ok(event) => event,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                timers.borrow_mut().fire_expired(&lua);
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         let lua_event_table = lua.create_table()?;
 
         match &event {
@@ -456,6 +720,18 @@ pub fn run_lua(rx: Receiver<WaylandEvent>, tx: Sender<WaylandRequest>) -> LuaRes
                 let _ = lua_event_table.set("type", "LayerSurfaceClosed");
                 let _ = lua_event_table.set("id", *id);
             }
+            WaylandEvent::ProcessExited { id, exit_code } => {
+                let _ = lua_event_table.set("type", "ProcessExited");
+                let _ = lua_event_table.set("id", *id);
+                if let Some(code) = exit_code {
+                    let _ = lua_event_table.set("exit_code", *code);
+                }
+            }
+            WaylandEvent::ProcessStdout { id, line } => {
+                let _ = lua_event_table.set("type", "ProcessStdout");
+                let _ = lua_event_table.set("id", *id);
+                let _ = lua_event_table.set("line", line.clone());
+            }
             WaylandEvent::UserCommand(name) => {
                 let _ = lua_event_table.set("type", "UserCommand");
                 let _ = lua_event_table.set("name", name.clone());
@@ -597,6 +873,35 @@ pub fn run_lua(rx: Receiver<WaylandEvent>, tx: Sender<WaylandRequest>) -> LuaRes
                     }
                 }
             }
+            WaylandEvent::ProcessExited { id, exit_code } => {
+                let mut cbs = proc_callbacks.borrow_mut();
+                if let Some((on_exit_key, _)) = cbs.remove(id) {
+                    if let Some(key) = on_exit_key {
+                        if let Ok(f) = lua.registry_value::<mlua::Function>(&key) {
+                            let code_val: mlua::Value = match exit_code {
+                                Some(c) => mlua::Value::Integer(*c as i64),
+                                None => mlua::Value::Nil,
+                            };
+                            if let Err(e) = f.call::<mlua::Value, ()>(code_val) {
+                                eprintln!("mplug: process on_exit error: {e}");
+                            }
+                        }
+                        let _ = lua.remove_registry_value(key);
+                    }
+                }
+            }
+            WaylandEvent::ProcessStdout { id, line } => {
+                let cbs = proc_callbacks.borrow();
+                if let Some((_, on_stdout_key)) = cbs.get(id) {
+                    if let Some(key) = on_stdout_key {
+                        if let Ok(f) = lua.registry_value::<mlua::Function>(key) {
+                            if let Err(e) = f.call::<String, ()>(line.clone()) {
+                                eprintln!("mplug: process on_stdout error: {e}");
+                            }
+                        }
+                    }
+                }
+            }
             WaylandEvent::Idled => {
                 idle = true;
             }
@@ -708,6 +1013,43 @@ pub fn run_lua(rx: Receiver<WaylandEvent>, tx: Sender<WaylandRequest>) -> LuaRes
                 )) {
                     eprintln!("mplug: plugin listener error: {e}");
                 }
+            }
+        }
+
+        timers.borrow_mut().fire_expired(&lua);
+
+        while let Ok(proc_event) = proc_event_rx.try_recv() {
+            match &proc_event {
+                WaylandEvent::ProcessExited { id, exit_code } => {
+                    let mut cbs = proc_callbacks.borrow_mut();
+                    if let Some((on_exit_key, _)) = cbs.remove(id) {
+                        if let Some(key) = on_exit_key {
+                            if let Ok(f) = lua.registry_value::<mlua::Function>(&key) {
+                                let code_val: mlua::Value = match exit_code {
+                                    Some(c) => mlua::Value::Integer(*c as i64),
+                                    None => mlua::Value::Nil,
+                                };
+                                if let Err(e) = f.call::<mlua::Value, ()>(code_val) {
+                                    eprintln!("mplug: process on_exit error: {e}");
+                                }
+                            }
+                            let _ = lua.remove_registry_value(key);
+                        }
+                    }
+                }
+                WaylandEvent::ProcessStdout { id, line } => {
+                    let cbs = proc_callbacks.borrow();
+                    if let Some((_, on_stdout_key)) = cbs.get(id) {
+                        if let Some(key) = on_stdout_key {
+                            if let Ok(f) = lua.registry_value::<mlua::Function>(key) {
+                                if let Err(e) = f.call::<String, ()>(line.clone()) {
+                                    eprintln!("mplug: process on_stdout error: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }

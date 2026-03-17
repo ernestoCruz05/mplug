@@ -91,6 +91,14 @@ pub enum WaylandEvent {
     LayerSurfaceClosed {
         id: u32,
     },
+    ProcessExited {
+        id: u64,
+        exit_code: Option<i32>,
+    },
+    ProcessStdout {
+        id: u64,
+        line: String,
+    },
     UserCommand(String),
 }
 

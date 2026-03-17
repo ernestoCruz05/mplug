@@ -40,6 +40,8 @@ To use an example, copy it to `~/.config/mplug/plugins/`, then run `mplug enable
   - [Window management](#window-management)
   - [Output management](#output-management)
   - [Layer shell](#layer-shell)
+  - [Timers](#timers)
+  - [Process lifecycle](#process-lifecycle)
 - [Event Reference](#event-reference)
 - [State Snapshot Reference](#state-snapshot-reference)
 - [Socket IPC](#socket-ipc)
@@ -475,6 +477,80 @@ The `LayerSurfaceConfigured` and `LayerSurfaceClosed` events are also delivered 
 
 ---
 
+### Timers
+
+**`mplug.every(ms, fn)`**
+
+Registers a recurring timer that calls `fn` approximately every `ms` milliseconds. Returns a handle table with a `:cancel()` method and an `id` field.
+
+```lua
+local t = mplug.every(5000, function()
+    local out, _ = mplug.exec("date +%H:%M")
+    print("time:", out)
+end)
+
+-- later:
+t:cancel()
+```
+
+Timers are checked on every event loop tick. The callback is called synchronously in the Lua thread; avoid blocking operations inside timer callbacks. Recurring timers reschedule based on the original deadline to avoid drift.
+
+**`mplug.after(ms, fn)`**
+
+Registers a one-shot timer that calls `fn` once after `ms` milliseconds. Returns a handle table with a `:cancel()` method and an `id` field. The callback is not called if `:cancel()` is called before the timer fires.
+
+```lua
+local t = mplug.after(2000, function()
+    mplug.set_output_power(false)
+end)
+
+-- cancel before it fires:
+t:cancel()
+```
+
+---
+
+### Process lifecycle
+
+**`mplug.spawn(cmd, opts)`**
+
+Spawns an external process and returns a handle table. `cmd` is the executable path or name. `opts` is an optional table with the following fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `args` | array of strings | Command-line arguments |
+| `on_exit` | function | Called when the process exits: `on_exit(id, exit_code)`. `exit_code` is an integer or `nil` if the process was signalled |
+| `on_stdout` | function | Called for each line of stdout output: `on_stdout(id, line)` |
+
+The returned handle table has:
+
+| Field/Method | Description |
+|---|---|
+| `id` | mplug-internal process ID (`integer`) |
+| `pid` | OS process ID (`integer`) |
+| `:kill()` | Sends SIGTERM to the process |
+
+Stderr is discarded. Stdout is read line-by-line in a background thread; each line triggers `on_stdout` in the Lua thread. Exit is detected by polling `try_wait` every 100 ms; `on_exit` is called in the Lua thread after the process terminates.
+
+```lua
+local proc = mplug.spawn("my-script", {
+    args = { "--flag", "value" },
+    on_exit = function(id, code)
+        print("process", id, "exited with", code)
+    end,
+    on_stdout = function(id, line)
+        print("output:", line)
+    end,
+})
+
+-- kill it later:
+proc:kill()
+```
+
+The `ProcessExited` and `ProcessStdout` events are also delivered to all registered listeners (see [Event Reference](#event-reference)).
+
+---
+
 ## Event Reference
 
 Every listener receives an `event` table as its first argument. The `event.type` field is always present and identifies the event. Additional fields depend on the event type.
@@ -634,6 +710,26 @@ Fired when the compositor has closed a layer shell surface.
 |---|---|---|
 | `type` | string | `"LayerSurfaceClosed"` |
 | `id` | integer | Surface ID |
+
+### `ProcessExited`
+
+Fired when a process spawned by `mplug.spawn()` exits.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | string | `"ProcessExited"` |
+| `id` | integer | mplug-internal process ID |
+| `exit_code` | integer or nil | Exit code, or `nil` if the process was killed by a signal |
+
+### `ProcessStdout`
+
+Fired once per line of stdout output from a process spawned by `mplug.spawn()`.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | string | `"ProcessStdout"` |
+| `id` | integer | mplug-internal process ID |
+| `line` | string | One line of output (newline stripped) |
 
 ### `UserCommand`
 

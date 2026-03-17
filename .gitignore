@@ -1,3 +1,6 @@
 /target
+/src/target
+/rust_out
+.gitignore
 .research/
 .planning/
