@@ -32,6 +32,7 @@ To use an example, copy it to `~/.config/mplug/plugins/`, then run `mplug enable
   - [Single-file plugins](#single-file-plugins)
   - [Directory plugins](#directory-plugins)
   - [Manifest format and validation](#manifest-format-and-validation)
+  - [Collections](#collections)
   - [Multi-file plugins and require](#multi-file-plugins-and-require)
 - [Plugin API Reference](#plugin-api-reference)
   - [mplug.add_listener](#mplugadd_listener)
@@ -158,7 +159,18 @@ mplug disable my-plugin
 
 ### `mplug list`
 
-Prints all installed plugins (both `.lua` files and directories under `~/.config/mplug/plugins/`) with their enabled or disabled status.
+Prints all installed plugins with their enabled or disabled status. Collection members show a `(via <repo>)` annotation so you know which repository they belong to and how to update them. Collection repositories themselves are listed separately with a `collection` label and a reminder of the update command.
+
+---
+
+### `mplug remove <name>`
+
+Removes an installed plugin from disk and disables it. For collection repositories, also removes all member symlinks and removes each member from the enabled set.
+
+```
+mplug remove my-plugin
+mplug remove my-bundle      # also removes carousel.lua, all-float.lua, etc.
+```
 
 ---
 
@@ -220,7 +232,7 @@ A directory plugin lives under `~/.config/mplug/plugins/<name>/` and must contai
 
 ### Manifest format and validation
 
-The `mplug.toml` manifest is a TOML file at the root of the plugin directory. It has exactly three required fields:
+The `mplug.toml` manifest is a TOML file at the root of the plugin directory. A standard single-plugin manifest has three fields:
 
 ```toml
 name        = "my-plugin"
@@ -230,24 +242,23 @@ entry_point = "init.lua"
 
 **Field definitions:**
 
-| Field | Type | Description |
-|---|---|---|
-| `name` | string | Human-readable plugin name. Used in error messages and logging. |
-| `version` | string | Plugin version. No format is enforced; any non-empty string is accepted. |
-| `entry_point` | string | Path to the Lua entry point, relative to the plugin directory. |
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | always | Human-readable plugin name. Used in error messages and logging. |
+| `version` | string | always | Plugin version. No format is enforced; any non-empty string is accepted. |
+| `entry_point` | string | unless collection | Path to the Lua entry point, relative to the plugin directory. |
 
 **Validation rules:**
 
 mplug applies two stages of validation when a plugin is installed via `mplug add` and again when loaded at daemon startup:
 
 1. **TOML parse**: The file must be valid TOML. Any syntax error causes validation to fail.
-2. **Field presence**: All three fields (`name`, `version`, `entry_point`) must be present in the TOML. If any field is missing, the TOML parser rejects the document because all fields are non-optional in the manifest struct.
-3. **Non-empty check**: Each field's value is trimmed of whitespace. If the trimmed value is empty, validation fails with an error message naming the offending field.
+2. **Non-empty check**: `name` and `version` are trimmed of whitespace and must be non-empty. `entry_point` must be non-empty unless a `[collection]` section is present (see below).
 
 Examples of invalid manifests:
 
 ```toml
-# Fails: entry_point is missing entirely
+# Fails: entry_point is missing and no collection section
 name    = "my-plugin"
 version = "0.1.0"
 ```
@@ -260,6 +271,33 @@ entry_point = "init.lua"
 ```
 
 When validation fails during `mplug add`, the cloned directory is removed and the error is printed. When validation fails at daemon startup (for example if a manifest was edited after installation), the plugin is skipped and a warning is printed to stderr; other plugins continue to load normally.
+
+### Collections
+
+A collection is a single repository that ships multiple independent plugins. Instead of `entry_point`, the manifest declares a `[collection]` section listing plugin names. Each name must correspond to a `.lua` file of the same name in the repository root.
+
+```toml
+name    = "my-bundle"
+version = "1.0.0"
+
+[collection]
+plugins = ["carousel", "all-float", "autotile"]
+```
+
+When `mplug add` clones a collection repository, it creates a symlink in `~/.config/mplug/plugins/` for each member (`carousel.lua`, `all-float.lua`, `autotile.lua` pointing into the cloned directory). Each member then behaves exactly like a standalone single-file plugin: it can be enabled, disabled, and listed independently.
+
+```
+mplug add https://github.com/user/my-bundle
+# → Added collection: my-bundle
+#   → mplug enable carousel
+#   → mplug enable all-float
+#   → mplug enable autotile
+
+mplug enable carousel
+mplug enable autotile
+```
+
+`mplug update my-bundle` updates the cloned git repository; all symlinks remain valid because they point into it.
 
 ### Multi-file plugins and require
 

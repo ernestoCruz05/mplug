@@ -1,4 +1,5 @@
 use crate::manifest::{load_manifest, validate_manifest};
+use std::os::unix::fs::symlink;
 use anyhow::{Context, Result, bail};
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -51,7 +52,12 @@ pub fn save_config(config: &MplugConfig) -> Result<()> {
 }
 
 fn plugin_installed(plugins_dir: &std::path::Path, plugin: &str) -> bool {
-    plugins_dir.join(plugin).is_dir() || plugins_dir.join(plugin).with_extension("lua").is_file()
+    plugins_dir.join(plugin).is_dir()
+        || plugins_dir.join(plugin).with_extension("lua").is_file()
+        || plugins_dir
+            .join(plugin)
+            .with_extension("lua")
+            .is_symlink()
 }
 
 pub fn enable_plugin(plugin: &str) -> Result<()> {
@@ -94,6 +100,24 @@ pub fn disable_plugin(plugin: &str) -> Result<()> {
     Ok(())
 }
 
+// Returns the collection directory name if `link` is a symlink pointing into a
+// collection repo inside `plugins_dir`, otherwise None.
+fn collection_source(link: &std::path::Path, plugins_dir: &std::path::Path) -> Option<String> {
+    let target = fs::read_link(link).ok()?;
+    // Symlinks are stored as absolute paths.
+    let col_dir = target.parent()?;
+    if !col_dir.starts_with(plugins_dir) {
+        return None;
+    }
+    let col_name = col_dir.file_name()?.to_str()?.to_string();
+    if let Ok(manifest) = load_manifest(col_dir) {
+        if manifest.collection.is_some() {
+            return Some(col_name);
+        }
+    }
+    None
+}
+
 pub fn list_plugins() -> Result<()> {
     let config = load_config();
     let plugins_dir = get_config_dir().join("plugins");
@@ -101,18 +125,51 @@ pub fn list_plugins() -> Result<()> {
     let entries = fs::read_dir(&plugins_dir)
         .with_context(|| format!("Cannot read plugins directory: {}", plugins_dir.display()))?;
 
-    let mut rows: Vec<(String, bool)> = Vec::new();
+    // (sort_key, display_name, enabled, via_collection, is_collection_dir)
+    enum Row {
+        Plugin { name: String, enabled: bool, via: Option<String> },
+        Collection { name: String, member_count: usize },
+    }
+
+    let mut rows: Vec<Row> = Vec::new();
 
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("lua") {
-            if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
-                rows.push((name.to_string(), config.enabled_plugins.contains(name)));
-            }
+            let Some(name) = path.file_stem().and_then(|n| n.to_str()).map(str::to_string)
+            else {
+                continue;
+            };
+            let via = if path.is_symlink() {
+                collection_source(&path, &plugins_dir)
+            } else {
+                None
+            };
+            rows.push(Row::Plugin {
+                enabled: config.enabled_plugins.contains(&name),
+                name,
+                via,
+            });
         } else if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                rows.push((name.to_string(), config.enabled_plugins.contains(name)));
+            let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string)
+            else {
+                continue;
+            };
+            // If this dir is a collection repo, show it as such (not enable-able directly).
+            if let Ok(manifest) = load_manifest(&path) {
+                if let Some(col) = &manifest.collection {
+                    rows.push(Row::Collection {
+                        name,
+                        member_count: col.plugins.len(),
+                    });
+                    continue;
+                }
             }
+            rows.push(Row::Plugin {
+                enabled: config.enabled_plugins.contains(&name),
+                name,
+                via: None,
+            });
         }
     }
 
@@ -122,24 +179,53 @@ pub fn list_plugins() -> Result<()> {
         return Ok(());
     }
 
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows.sort_by_key(|r| match r {
+        Row::Plugin { name, .. } => name.clone(),
+        Row::Collection { name, .. } => name.clone(),
+    });
 
-    println!("Installed plugins ({})", rows.len());
-    for (name, enabled) in &rows {
-        if *enabled {
-            println!(
-                "  {} {}  {}",
-                style("→").cyan(),
-                name,
-                style("enabled").green()
-            );
-        } else {
-            println!(
-                "  {} {}  {}",
-                style("→").dim(),
-                name,
-                style("disabled").dim()
-            );
+    let plugin_count = rows
+        .iter()
+        .filter(|r| matches!(r, Row::Plugin { .. }))
+        .count();
+    println!("Installed plugins ({})", plugin_count);
+
+    for row in &rows {
+        match row {
+            Row::Plugin { name, enabled, via: None } => {
+                if *enabled {
+                    println!("  {} {}  {}", style("→").cyan(), name, style("enabled").green());
+                } else {
+                    println!("  {} {}  {}", style("→").dim(), name, style("disabled").dim());
+                }
+            }
+            Row::Plugin { name, enabled, via: Some(col) } => {
+                if *enabled {
+                    println!(
+                        "  {} {}  {}  {}",
+                        style("→").cyan(),
+                        name,
+                        style("enabled").green(),
+                        style(format!("(via {col})")).dim()
+                    );
+                } else {
+                    println!(
+                        "  {} {}  {}  {}",
+                        style("→").dim(),
+                        name,
+                        style("disabled").dim(),
+                        style(format!("(via {col})")).dim()
+                    );
+                }
+            }
+            Row::Collection { name, member_count } => {
+                println!(
+                    "  {} {}  {}",
+                    style("→").yellow(),
+                    name,
+                    style(format!("collection ({member_count} plugins — update with: mplug update {name})")).dim()
+                );
+            }
         }
     }
     Ok(())
@@ -196,14 +282,51 @@ pub fn add_plugin(repo: &str) -> Result<()> {
                         let _ = fs::remove_dir_all(&target_path);
                         bail!("Plugin '{}' has no valid mplug.toml: {}", dir_name, err)
                     }
+
+                    if let Some(col) = &manifest.collection {
+                        // Collection: create a symlink per member in plugins_dir
+                        let mut linked = Vec::new();
+                        let mut errors = Vec::new();
+                        for plugin in &col.plugins {
+                            let src = target_path.join(format!("{}.lua", plugin));
+                            let link = plugins_dir.join(format!("{}.lua", plugin));
+                            if link.exists() || link.is_symlink() {
+                                errors.push(format!(
+                                    "'{}' already exists — skipping",
+                                    plugin
+                                ));
+                            } else {
+                                match symlink(&src, &link) {
+                                    Ok(()) => linked.push(plugin.clone()),
+                                    Err(e) => errors.push(format!("'{}': {}", plugin, e)),
+                                }
+                            }
+                        }
+                        println!(
+                            "{} Added collection: {}",
+                            style("✔").green().bold(),
+                            dir_name
+                        );
+                        for name in &linked {
+                            println!(
+                                "  {} mplug enable {}",
+                                style("→").dim(),
+                                name
+                            );
+                        }
+                        for err in &errors {
+                            println!("  {} {}", style("!").yellow().bold(), err);
+                        }
+                    } else {
+                        println!("{} Added: {}", style("✔").green().bold(), dir_name);
+                        println!(
+                            "  {} enable it with: mplug enable {}",
+                            style("→").dim(),
+                            dir_name
+                        );
+                    }
                 }
             }
-            println!("{} Added: {}", style("✔").green().bold(), dir_name);
-            println!(
-                "  {} enable it with: mplug enable {}",
-                style("→").dim(),
-                dir_name
-            );
         }
         Ok(out) => bail!(
             "git clone failed: {}",
@@ -211,6 +334,49 @@ pub fn add_plugin(repo: &str) -> Result<()> {
         ),
         Err(e) => bail!("Failed to spawn git: {e} — is git installed?"),
     }
+    Ok(())
+}
+
+pub fn remove_plugin(name: &str) -> Result<()> {
+    let plugins_dir = get_config_dir().join("plugins");
+    let plugin_dir = plugins_dir.join(name);
+    let plugin_file = plugins_dir.join(name).with_extension("lua");
+
+    if !plugin_dir.exists() && !plugin_file.exists() && !plugin_file.is_symlink() {
+        bail!(
+            "Plugin '{}' is not installed — use `mplug list` to see installed plugins",
+            name
+        )
+    }
+
+    let mut config = load_config();
+
+    if plugin_dir.is_dir() {
+        // If this is a collection repo, remove each member's symlink and enabled entry.
+        if let Ok(manifest) = load_manifest(&plugin_dir) {
+            if let Some(col) = &manifest.collection {
+                for member in &col.plugins {
+                    let link = plugins_dir.join(format!("{}.lua", member));
+                    if link.is_symlink() || link.exists() {
+                        fs::remove_file(&link).with_context(|| {
+                            format!("Failed to remove symlink for '{}'", member)
+                        })?;
+                    }
+                    config.enabled_plugins.remove(member);
+                }
+            }
+        }
+        config.enabled_plugins.remove(name);
+        fs::remove_dir_all(&plugin_dir)
+            .with_context(|| format!("Failed to remove {}", plugin_dir.display()))?;
+    } else {
+        config.enabled_plugins.remove(name);
+        fs::remove_file(&plugin_file)
+            .with_context(|| format!("Failed to remove {}", plugin_file.display()))?;
+    }
+
+    save_config(&config)?;
+    println!("{} Removed: {}", style("✔").green().bold(), name);
     Ok(())
 }
 

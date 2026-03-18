@@ -501,7 +501,17 @@ pub fn run_lua(rx: Receiver<WaylandEvent>, tx: Sender<WaylandRequest>) -> LuaRes
             }
 
             match load_manifest(&plugin_dir_path) {
-                Ok(manifest) => Some(plugin_dir_path.join(&manifest.entry_point)),
+                Ok(manifest) => manifest
+                    .entry_point
+                    .filter(|ep| !ep.trim().is_empty())
+                    .map(|ep| plugin_dir_path.join(ep))
+                    .or_else(|| {
+                        eprintln!(
+                            "Plugin '{}' has no entry_point in mplug.toml",
+                            plugin_name
+                        );
+                        None
+                    }),
                 Err(err) => {
                     eprintln!("Plugin '{}' has no valid mplug.toml: {}", plugin_name, err);
                     None

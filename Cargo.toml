@@ -1,6 +1,6 @@
 [package]
 name = "mplug"
-version = "0.1.0"
+version = "0.2.0"
 description = "Manifest-driven plugin manager for MangoWM / MangoWC Wayland compositors"
 edition = "2024"
 

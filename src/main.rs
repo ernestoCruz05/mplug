@@ -68,6 +68,10 @@ enum Commands {
     #[command(after_help = "Examples:\n  mplug update plugin-name\n  mplug update dynamic-tiling")]
     Update { name: String },
     #[command(
+        after_help = "Examples:\n  mplug remove plugin-name\n  mplug remove my-bundle\n\nFor collections, also removes all member symlinks and disables them."
+    )]
+    Remove { name: String },
+    #[command(
         after_help = "Examples:\n  mplug outdated\n\nCompares installed plugins against their git remotes and lists any with upstream commits not yet pulled."
     )]
     Outdated,
@@ -119,6 +123,7 @@ fn run() -> Result<()> {
         Commands::List => config::list_plugins()?,
         Commands::Add { repo } => config::add_plugin(repo)?,
         Commands::Update { name } => config::update_plugin(name)?,
+        Commands::Remove { name } => config::remove_plugin(name)?,
         Commands::Outdated => config::outdated_plugins()?,
     }
     Ok(())
