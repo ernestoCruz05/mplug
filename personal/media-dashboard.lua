@@ -105,8 +105,16 @@ local function show_media_notification(force)
 end
 
 mplug.add_listener(function(event, state)
-    if event.type == "UserCommand" and event.name == "media_dashboard" then
-        show_media_notification(true)
+    if event.type == "UserCommand" then
+        if event.name == "media_dashboard" then
+            show_media_notification(true)
+        elseif event.name == "media_playpause" then
+            mplug.spawn("playerctl", { args = { "--player=spotify", "play-pause" } })
+        elseif event.name == "media_next" then
+            mplug.spawn("playerctl", { args = { "--player=spotify", "next" } })
+        elseif event.name == "media_prev" then
+            mplug.spawn("playerctl", { args = { "--player=spotify", "previous" } })
+        end
     end
 end)
 
