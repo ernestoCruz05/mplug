@@ -17,6 +17,7 @@ The `examples/` directory contains ready-to-use plugins that demonstrate capabil
 | `powersave.lua` | On idle: launches a screen locker and blanks the display; restores on activity |
 | `output-hotplug.lua` | Configures a monitor automatically the moment it is connected at runtime |
 | `urgent-follow.lua` | Switches to a tag with an urgent window when the current tag is idle |
+| `notifications.lua` | Sends custom Dunst notification popups on layout, keyboard layout, and keymode changes |
 
 To use an example, copy it to `~/.config/mplug/plugins/`, then run `mplug enable <name>`.
 
@@ -601,6 +602,120 @@ proc:kill()
 
 The `ProcessExited` and `ProcessStdout` events are also delivered to all registered listeners (see [Event Reference](#event-reference)).
 
+## MangoWM IPC API Reference
+
+When running inside MangoWM, the following functions communicate directly with the Mango compositor's UNIX domain socket, unlocking direct layout, scratchpad, gaps, and Vim keyboard mode capabilities.
+
+### `mplug.ipc_get`
+
+```lua
+local result, err = mplug.ipc_get(command)
+```
+
+Sends a query command (e.g. `all-clients`, `all-monitors`, `all-tags`, `keymode`, `keyboardlayout`) to the Mango compositor and returns a parsed Lua table/value. Returns `nil, error_message` if the command fails.
+
+```lua
+local clients, err = mplug.ipc_get("all-clients")
+for _, c in ipairs(clients.clients) do
+    print(c.title, c.pid, c.is_focused)
+end
+```
+
+### `mplug.ipc_dispatch`
+
+```lua
+local success, err = mplug.ipc_dispatch(command)
+```
+
+Dispatches an arbitrary function command to MangoWM. Returns a boolean status (`true`, or `false` if Mango reports `success: false`), or `nil, error_message` on failure. Replies without an explicit status count as success.
+
+```lua
+local ok, err = mplug.ipc_dispatch("exchange_client,left")
+```
+
+### `mplug.watch`
+
+```lua
+mplug.watch(topic, callback)
+```
+
+Subscribe to a mango compositor `watch` topic. `callback` is invoked for each
+update mango emits — for most topics mango sends the current state on subscribe,
+then an update on every change. `callback` receives the update parsed into a Lua
+table.
+
+`topic` is any mango `watch` topic, including scoped forms:
+`"focusing-client"`, `"last_open_surface"`, `"all-clients"`, `"all-monitors"`,
+`"all-tags"`, `"monitor DP-1"`, `"client 4"`, `"tags DP-1"`.
+
+```lua
+mplug.watch("focusing-client", function(client)
+    -- client is the parsed JSON table
+    mplug.exec("notify-send 'Focus' '" .. (client.title or "?") .. "'")
+end)
+```
+
+Each watch runs on its own background thread, so it never blocks the event
+loop. Watches are fire-and-forget: they run until the daemon exits and cannot
+be cancelled. Lines that are not valid JSON are skipped. It is a no-op if the
+daemon is not running under mango (`MANGO_INSTANCE_SIGNATURE` unset).
+
+> For one-shot reads use `mplug.ipc_get("get …")`. Passing a `watch` command to
+> `ipc_get` is rejected — use `mplug.watch` instead.
+
+---
+
+### Convenience Compositor Wrappers
+
+**`mplug.focus_dir(direction)`**
+Gives focus to the window in the given direction (`"left"`, `"right"`, `"up"`, `"down"`).
+
+**`mplug.focus_last()`**
+Gives focus to the previously active window.
+
+**`mplug.zoom()`**
+Toggles the active window between the master and stack areas.
+
+**`mplug.exchange_client(direction)`**
+Swaps the active window with the window in the given direction (`"left"`, `"right"`, `"up"`, `"down"`).
+
+**`mplug.inc_nmaster(n)`**
+Changes the number of windows allowed in the master area by `n`.
+
+**`mplug.set_mfact(fact)`**
+Sets the master area width factor (e.g. `0.55` for 55% screen width).
+
+**`mplug.toggle_floating()`**
+Toggles the active window between floating and tiled states.
+
+**`mplug.toggle_fullscreen()`**
+Toggles fullscreen mode on the active window.
+
+**`mplug.center_window()`**
+Centers the active window on screen (only applies if floating).
+
+**`mplug.toggle_gaps()`**
+Toggles window gaps on/off.
+
+**`mplug.inc_gaps(n)`**
+Increases or decreases window gaps by `n` pixels.
+
+**`mplug.reload_config()`**
+Reloads the compositor configuration file.
+
+**`mplug.toggle_overview(n)`**
+Toggles tag overview mode on monitor `n`.
+
+**`mplug.toggle_scratchpad()`**
+Toggles the default scratchpad terminal.
+
+**`mplug.toggle_named_scratchpad(name, cmd, rule)`**
+Toggles a named scratchpad. Spawns `cmd` and applies the given class/app_id routing `rule` (e.g. `"floating"` or window titles).
+
+```lua
+mplug.toggle_named_scratchpad("norg", "foot -T norg -e nvim", "norg")
+```
+
 ---
 
 ## Event Reference
@@ -804,6 +919,51 @@ mplug.add_listener(function(event, state)
 end)
 ```
 
+### `IpcKeyMode`
+
+Fired when the keyboard mode changes in the compositor (e.g. from `normal` to `insert`).
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | string | `"IpcKeyMode"` |
+| `keymode` | string | The name of the new active keymode |
+
+### `IpcKeyboardLayout`
+
+Fired when the active keyboard layout changes.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | string | `"IpcKeyboardLayout"` |
+| `layout` | string | The name of the new active keyboard layout |
+
+### `IpcMonitors`
+
+Fired when a monitor is added, removed, or has layout/geometry changes.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | string | `"IpcMonitors"` |
+| `data` | table | A JSON-parsed list of all current monitors and their properties |
+
+### `IpcClients`
+
+Fired when a client is opened, closed, focused, or modified.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | string | `"IpcClients"` |
+| `data` | table | A JSON-parsed list of all current clients and their detailed properties |
+
+### `IpcTags`
+
+Fired when tags change state or layout.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | string | `"IpcTags"` |
+| `data` | table | A JSON-parsed table of all monitors and their tag configurations |
+
 ### `Generic`
 
 A catch-all type for any Wayland event that does not map to one of the above types. No additional fields are guaranteed.
@@ -824,6 +984,13 @@ The second argument passed to every listener is a snapshot of accumulated compos
 | `layout_symbol` | string | Active layout symbol string from the compositor |
 | `idle` | boolean | Whether the session is currently idle |
 | `output_power_on` | boolean | Whether the display power is on |
+| `keymode` | string | Current Vim keyboard mode (e.g. `"normal"`, `"insert"`) |
+| `keyboard_layout` | string | Active XKB layout name (e.g. `"us"`) |
+| `ipc_monitors` | table | JSON-parsed table of all monitors (full details including layout_symbol, geometry, tags, active_client, etc.) |
+| `ipc_clients` | table | JSON-parsed list of all clients (full details including pid, geometry, focused, scratchpad, etc.) |
+| `ipc_tags` | table | JSON-parsed tag configuration and layout state on all monitors |
+
+> The `ipc_*` fields are `nil` until the first corresponding update arrives from Mango (and always `nil` outside MangoWM); `keymode` and `keyboard_layout` start as empty strings. Guard against this in listeners that run early in a session.
 
 ### `state.active_tags`
 

@@ -1,0 +1,16 @@
+name    = "personal"
+version = "0.1.0"
+
+[collection]
+plugins = [
+    "workspace-listener",
+    "media-dashboard",
+    "volume-controller",
+    "brightness-controller",
+    "system-metrics",
+    "clock-calendar",
+    "radar",
+    "screenshot",
+    "power-menu",
+    "audio-switcher"
+]

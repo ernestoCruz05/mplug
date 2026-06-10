@@ -15,6 +15,7 @@ pub mod dwl_ipc {
 pub mod config;
 pub mod event;
 pub mod lua;
+pub mod mango_ipc;
 pub mod manifest;
 pub mod socket;
 pub mod wayland;
@@ -75,6 +76,10 @@ enum Commands {
         after_help = "Examples:\n  mplug outdated\n\nCompares installed plugins against their git remotes and lists any with upstream commits not yet pulled."
     )]
     Outdated,
+    #[command(
+        after_help = "Examples:\n  mplug trigger battery\n  mplug trigger volume_up\n\nSends a UserCommand to the running daemon so enabled plugins can react to it. Bind these to keys in your compositor config."
+    )]
+    Trigger { name: String },
 }
 
 fn main() -> std::process::ExitCode {
@@ -103,9 +108,19 @@ fn run() -> Result<()> {
                 wayland::run_wayland(event_tx, req_rx);
             });
 
+            if std::env::var("MANGO_INSTANCE_SIGNATURE").is_ok() {
+                println!("MangoWM signature found. Starting Mango IPC watch threads...");
+                for topic in mango_ipc::WATCH_TOPICS {
+                    mango_ipc::start_watch_thread(topic, event_tx_socket.clone());
+                }
+            } else {
+                println!("MANGO_INSTANCE_SIGNATURE not set. Mango IPC watch threads skipped.");
+            }
+
             let req_tx_socket = req_tx.clone();
+            let event_tx_lua = event_tx_socket.clone();
             let lua_handle = thread::spawn(move || {
-                if let Err(e) = lua::run_lua(event_rx, req_tx) {
+                if let Err(e) = lua::run_lua(event_rx, req_tx, event_tx_lua) {
                     eprintln!("Lua thread error: {}", e);
                 }
             });
@@ -125,6 +140,7 @@ fn run() -> Result<()> {
         Commands::Update { name } => config::update_plugin(name)?,
         Commands::Remove { name } => config::remove_plugin(name)?,
         Commands::Outdated => config::outdated_plugins()?,
+        Commands::Trigger { name } => socket::send_command(&format!("trigger {name}"))?,
     }
     Ok(())
 }

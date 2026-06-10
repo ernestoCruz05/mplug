@@ -1,4 +1,4 @@
-// src/event.rs
+use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub struct HeadInfo {
@@ -100,6 +100,15 @@ pub enum WaylandEvent {
         line: String,
     },
     UserCommand(String),
+    IpcKeyMode(String),
+    IpcKeyboardLayout(String),
+    IpcMonitors(Value),
+    IpcClients(Value),
+    IpcTags(Value),
+    WatchUpdate {
+        id: u64,
+        value: Value,
+    },
 }
 
 #[derive(Debug, Clone)]

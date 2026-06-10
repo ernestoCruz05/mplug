@@ -1,9 +1,22 @@
 use crate::event::{WaylandEvent, WaylandRequest};
-use std::io::{BufRead, BufReader};
-use std::os::unix::net::UnixListener;
+use anyhow::{Context, Result};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc::Sender;
 
 pub const SOCKET_PATH: &str = "/tmp/mplug.sock";
+
+pub fn send_command(line: &str) -> Result<()> {
+    send_command_to(SOCKET_PATH, line)
+}
+
+fn send_command_to(path: &str, line: &str) -> Result<()> {
+    let mut stream = UnixStream::connect(path).with_context(|| {
+        format!("could not connect to mplug daemon at {path} — is the daemon running?")
+    })?;
+    writeln!(stream, "{line}").context("failed to write to mplug socket")?;
+    Ok(())
+}
 
 pub fn run_socket(req_tx: Sender<WaylandRequest>, event_tx: Sender<WaylandEvent>) {
     let _ = std::fs::remove_file(SOCKET_PATH);
@@ -117,5 +130,38 @@ fn parse_and_send(command: &str, req_tx: &Sender<WaylandRequest>, event_tx: &Sen
             }
         }
         _ => eprintln!("mplug socket: unknown command: {}", command),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn send_command_to_writes_line_to_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sock");
+        let path_str = path.to_str().unwrap().to_string();
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).unwrap();
+            line
+        });
+
+        send_command_to(&path_str, "trigger battery").unwrap();
+
+        assert_eq!(server.join().unwrap(), "trigger battery\n");
+    }
+
+    #[test]
+    fn send_command_to_errors_when_no_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.sock");
+        let result = send_command_to(missing.to_str().unwrap(), "trigger battery");
+        assert!(result.is_err());
     }
 }
