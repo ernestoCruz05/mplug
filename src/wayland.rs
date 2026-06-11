@@ -435,8 +435,9 @@ impl Dispatch<ZwlrOutputPowerV1, ()> for MplugState {
                 let _ = state.event_tx.send(WaylandEvent::OutputPowerMode { on });
             }
             zwlr_output_power_v1::Event::Failed => {
-                eprintln!(
-                    "mplug: zwlr_output_power_v1 failed (compositor may not support output power control)"
+                crate::log_warn!(
+                    "wayland",
+                    "zwlr_output_power_v1 failed (compositor may not support output power control)"
                 );
             }
             _ => {}
@@ -692,13 +693,15 @@ impl Dispatch<ZwlrOutputConfigurationV1, ()> for MplugState {
         match event {
             Event::Succeeded => {}
             Event::Failed => {
-                eprintln!(
-                    "mplug: zwlr_output_configuration_v1 apply failed (compositor rejected the configuration)"
+                crate::log_warn!(
+                    "wayland",
+                    "zwlr_output_configuration_v1 apply failed (compositor rejected the configuration)"
                 );
             }
             Event::Cancelled => {
-                eprintln!(
-                    "mplug: zwlr_output_configuration_v1 cancelled (serial outdated — retry)"
+                crate::log_warn!(
+                    "wayland",
+                    "zwlr_output_configuration_v1 cancelled (serial outdated — retry)"
                 );
             }
             _ => {}
@@ -903,17 +906,17 @@ pub fn run_wayland(tx: Sender<WaylandEvent>, rx: Receiver<WaylandRequest>) {
         toplevel_handles: HashMap::new(),
     };
 
-    println!("Wayland thread running...");
+    crate::log_info!("wayland", "Wayland thread running...");
     loop {
         if let Err(e) = event_queue.blocking_dispatch(&mut state) {
-            eprintln!("Wayland dispatch error: {}", e);
+            crate::log_error!("wayland", "Wayland dispatch error: {}", e);
             break;
         }
 
         std::thread::sleep(std::time::Duration::from_millis(15));
 
         while let Ok(req) = rx.try_recv() {
-            println!("Wayland handling request from Lua: {:?}", req);
+            crate::log_debug!("wayland", "handling request from Lua: {:?}", req);
             match req {
                 WaylandRequest::SetLayout(index) => {
                     for out in &state.ipc_outputs {
@@ -1123,16 +1126,16 @@ pub fn run_wayland(tx: Sender<WaylandEvent>, rx: Receiver<WaylandRequest>) {
                             .open(&path);
                         match file {
                             Err(e) => {
-                                eprintln!("mplug: failed to open shm file {}: {}", path, e);
+                                crate::log_error!("wayland", "failed to open shm file {}: {}", path, e);
                             }
                             Ok(mut f) => {
                                 if let Err(e) = f.set_len(size as u64) {
-                                    eprintln!("mplug: set_len failed: {}", e);
+                                    crate::log_error!("wayland", "set_len failed: {}", e);
                                     return;
                                 }
                                 use std::io::Write as IoWrite;
                                 if let Err(e) = f.write_all(&buf) {
-                                    eprintln!("mplug: write failed: {}", e);
+                                    crate::log_error!("wayland", "write failed: {}", e);
                                     return;
                                 }
 

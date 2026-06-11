@@ -87,9 +87,11 @@ fn spawn_watch_loop(
                 Ok(mut stream) => {
                     let cmd = format!("watch {}\n", topic);
                     if let Err(e) = stream.write_all(cmd.as_bytes()) {
-                        eprintln!(
-                            "mplug mango_ipc: failed to write watch for {}: {}",
-                            topic, e
+                        crate::log_error!(
+                            "mango-ipc",
+                            "failed to write watch for {}: {}",
+                            topic,
+                            e
                         );
                     } else {
                         let reader = BufReader::new(stream);

@@ -24,12 +24,12 @@ pub fn run_socket(req_tx: Sender<WaylandRequest>, event_tx: Sender<WaylandEvent>
     let listener = match UnixListener::bind(SOCKET_PATH) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("mplug: failed to bind socket {}: {}", SOCKET_PATH, e);
+            crate::log_error!("socket", "failed to bind socket {}: {}", SOCKET_PATH, e);
             return;
         }
     };
 
-    println!("Socket IPC listening on {}", SOCKET_PATH);
+    crate::log_info!("socket", "Socket IPC listening on {}", SOCKET_PATH);
 
     for stream in listener.incoming() {
         match stream {
@@ -46,7 +46,7 @@ pub fn run_socket(req_tx: Sender<WaylandRequest>, event_tx: Sender<WaylandEvent>
                     }
                 });
             }
-            Err(e) => eprintln!("mplug: socket accept error: {}", e),
+            Err(e) => crate::log_error!("socket", "socket accept error: {}", e),
         }
     }
 }
@@ -63,7 +63,7 @@ fn parse_and_send(command: &str, req_tx: &Sender<WaylandRequest>, event_tx: &Sen
                 let name = parts[1..].join(" ");
                 let _ = event_tx.send(WaylandEvent::UserCommand(name));
             } else {
-                eprintln!("mplug socket: usage: trigger <name>");
+                crate::log_warn!("socket", "usage: trigger <name>");
             }
         }
 
@@ -71,28 +71,28 @@ fn parse_and_send(command: &str, req_tx: &Sender<WaylandRequest>, event_tx: &Sen
             if let Some(Ok(tagmask)) = parts.get(1).map(|s| s.parse::<u32>()) {
                 let _ = req_tx.send(WaylandRequest::SetTags(tagmask));
             } else {
-                eprintln!("mplug socket: usage: set_tags <tagmask>");
+                crate::log_warn!("socket", "usage: set_tags <tagmask>");
             }
         }
         "set_layout" => {
             if let Some(Ok(index)) = parts.get(1).map(|s| s.parse::<u32>()) {
                 let _ = req_tx.send(WaylandRequest::SetLayout(index));
             } else {
-                eprintln!("mplug socket: usage: set_layout <index>");
+                crate::log_warn!("socket", "usage: set_layout <index>");
             }
         }
         "focus_window" => {
             if let Some(Ok(id)) = parts.get(1).map(|s| s.parse::<u32>()) {
                 let _ = req_tx.send(WaylandRequest::ActivateToplevel { id });
             } else {
-                eprintln!("mplug socket: usage: focus_window <id>");
+                crate::log_warn!("socket", "usage: focus_window <id>");
             }
         }
         "close_window" => {
             if let Some(Ok(id)) = parts.get(1).map(|s| s.parse::<u32>()) {
                 let _ = req_tx.send(WaylandRequest::CloseToplevel { id });
             } else {
-                eprintln!("mplug socket: usage: close_window <id>");
+                crate::log_warn!("socket", "usage: close_window <id>");
             }
         }
         "set_window_tag" => {
@@ -103,7 +103,7 @@ fn parse_and_send(command: &str, req_tx: &Sender<WaylandRequest>, event_tx: &Sen
                 (Some(Ok(id)), Some(Ok(tagmask))) => {
                     let _ = req_tx.send(WaylandRequest::SetToplevelTags { id, tagmask });
                 }
-                _ => eprintln!("mplug socket: usage: set_window_tag <id> <tagmask>"),
+                _ => crate::log_warn!("socket", "usage: set_window_tag <id> <tagmask>"),
             }
         }
         "set_client_tags" => {
@@ -114,7 +114,7 @@ fn parse_and_send(command: &str, req_tx: &Sender<WaylandRequest>, event_tx: &Sen
                 (Some(Ok(and_tags)), Some(Ok(xor_tags))) => {
                     let _ = req_tx.send(WaylandRequest::SetClientTags { and_tags, xor_tags });
                 }
-                _ => eprintln!("mplug socket: usage: set_client_tags <and_tags> <xor_tags>"),
+                _ => crate::log_warn!("socket", "usage: set_client_tags <and_tags> <xor_tags>"),
             }
         }
         "set_window_minimized" => {
@@ -123,13 +123,13 @@ fn parse_and_send(command: &str, req_tx: &Sender<WaylandRequest>, event_tx: &Sen
                     let minimized = matches!(parts[2], "true" | "1");
                     let _ = req_tx.send(WaylandRequest::SetToplevelMinimized { id, minimized });
                 } else {
-                    eprintln!("mplug socket: usage: set_window_minimized <id> <true|false>");
+                    crate::log_warn!("socket", "usage: set_window_minimized <id> <true|false>");
                 }
             } else {
-                eprintln!("mplug socket: usage: set_window_minimized <id> <true|false>");
+                crate::log_warn!("socket", "usage: set_window_minimized <id> <true|false>");
             }
         }
-        _ => eprintln!("mplug socket: unknown command: {}", command),
+        _ => crate::log_warn!("socket", "unknown command: {}", command),
     }
 }
 

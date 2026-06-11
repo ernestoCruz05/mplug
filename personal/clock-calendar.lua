@@ -31,37 +31,58 @@ local function highlight_calendar(cal_text)
 	return table.concat(lines, "\n")
 end
 
+local function show_clock()
+	local time_str, _ = mplug.exec("date +'%H:%M  //  %A, %b %d'")
+	mplug.spawn("dunstify", {
+		args = {
+			"-t",
+			"3000",
+			"-h",
+			"string:x-dunst-stack-tag:clock-calendar",
+			"-a",
+			"Clock",
+			"Clock",
+			time_str,
+		},
+	})
+end
+
+local function show_calendar()
+	local cal_raw, _ = mplug.exec("cal")
+	local cal_highlighted = highlight_calendar(cal_raw)
+	mplug.spawn("dunstify", {
+		args = {
+			"-t",
+			"5000",
+			"-h",
+			"string:x-dunst-stack-tag:clock-calendar",
+			"-a",
+			"Calendar",
+			"Calendar",
+			"<span font='monospace'>" .. cal_highlighted .. "</span>",
+		},
+	})
+end
+
+local pending_timer = nil
+
 mplug.add_listener(function(event, state)
 	if event.type == "UserCommand" then
 		if event.name == "clock" then
-			local time_str, _ = mplug.exec("date +'%H:%M  //  %A, %b %d'")
-			mplug.spawn("dunstify", {
-				args = {
-					"-t",
-					"3000",
-					"-h",
-					"string:x-dunst-stack-tag:clock",
-					"-a",
-					"Clock",
-					"Clock",
-					time_str,
-				},
-			})
+			show_clock()
 		elseif event.name == "calendar" then
-			local cal_raw, _ = mplug.exec("cal")
-			local cal_highlighted = highlight_calendar(cal_raw)
-			mplug.spawn("dunstify", {
-				args = {
-					"-t",
-					"5000",
-					"-h",
-					"string:x-dunst-stack-tag:calendar",
-					"-a",
-					"Calendar",
-					"Calendar",
-					"<span font='monospace'>" .. cal_highlighted .. "</span>",
-				},
-			})
+			show_calendar()
+		elseif event.name == "clock_calendar" then
+			if pending_timer then
+				pending_timer:cancel()
+				pending_timer = nil
+				show_calendar()
+			else
+				show_clock()
+				pending_timer = mplug.after(3000, function()
+					pending_timer = nil
+				end)
+			end
 		end
 	end
 end)

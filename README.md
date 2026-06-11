@@ -2,7 +2,7 @@
 
 A Lua plugin manager and runtime daemon for MangoWM Wayland compositors.
 
-mplug bridges the `zdwl_ipc` Wayland protocol into an embedded Lua 5.4 environment, allowing users to write plugins that react to compositor events and dispatch window, layout, and output commands — without modifying compositor source code. Plugins are installed from git repositories, validated against a manifest, and hot-reloaded on daemon restart.
+mplug bridges the `zdwl_ipc` Wayland protocol into an embedded Lua 5.4 environment, allowing users to write plugins that react to compositor events and dispatch window, layout, and output commands, all without modifying compositor source code. Plugins are installed from git repositories, validated against a manifest, and hot-reloaded on daemon restart.
 
 ---
 
@@ -39,6 +39,7 @@ To use an example, copy it to `~/.config/mplug/plugins/`, then run `mplug enable
   - [mplug.add_listener](#mplugadd_listener)
   - [mplug.dispatch](#mplugdispatch)
   - [mplug.exec](#mplugexec)
+  - [mplug.log](#mpluglog)
   - [Window management](#window-management)
   - [Output management](#output-management)
   - [Layer shell](#layer-shell)
@@ -48,6 +49,7 @@ To use an example, copy it to `~/.config/mplug/plugins/`, then run `mplug enable
 - [State Snapshot Reference](#state-snapshot-reference)
 - [Socket IPC](#socket-ipc)
 - [Plugin Discovery and Loading](#plugin-discovery-and-loading)
+- [Logging](#logging)
 - [Error Handling](#error-handling)
 
 ---
@@ -191,6 +193,20 @@ For each plugin directory under `~/.config/mplug/plugins/`, runs `git fetch` and
 
 ---
 
+### `mplug log`
+
+Shows the daemon's log file (see [Logging](#logging)).
+
+```
+mplug log           # last 50 lines
+mplug log -n 200    # last 200 lines
+mplug log -f        # print new lines as they arrive (like tail -f)
+```
+
+The primary debugging tool: run `mplug log -f` in a terminal, press the keybind or trigger the event you are investigating, and watch what the daemon and plugins actually do.
+
+---
+
 ## Writing Plugins
 
 Plugins are Lua 5.4 scripts. At daemon startup, mplug executes each enabled plugin's entry point. Plugins register event listeners using `mplug.add_listener()`. Every Wayland event from the compositor calls all registered listeners with an event table and a state snapshot table.
@@ -271,7 +287,7 @@ version     = "0.1.0"
 entry_point = "init.lua"
 ```
 
-When validation fails during `mplug add`, the cloned directory is removed and the error is printed. When validation fails at daemon startup (for example if a manifest was edited after installation), the plugin is skipped and a warning is printed to stderr; other plugins continue to load normally.
+When validation fails during `mplug add`, the cloned directory is removed and the error is printed. When validation fails at daemon startup (for example if a manifest was edited after installation), the plugin is skipped and a warning is logged; other plugins continue to load normally.
 
 ### Collections
 
@@ -378,7 +394,7 @@ Move the window identified by `id` to the given tagmask. The `id` corresponds to
 mplug.dispatch("set_window_tag 5 2")  -- move window 5 to tag 2
 ```
 
-Unknown or malformed commands are logged to stderr and ignored.
+Unknown or malformed commands are logged and ignored.
 
 ---
 
@@ -393,6 +409,22 @@ Runs a shell command via `/bin/sh -c` and returns two values: the trimmed stdout
 ```lua
 local out, code = mplug.exec("date +%H")
 local hour = tonumber(out)
+```
+
+---
+
+### mplug.log
+
+```lua
+mplug.log(message)
+```
+
+Writes an INFO line to the daemon log (see [Logging](#logging)). The component tag is derived automatically from the calling plugin's file name, so each plugin's messages are attributable without any extra arguments:
+
+```lua
+-- inside clock-calendar.lua
+mplug.log("calendar shown")
+-- → 2026-06-11 13:53:41 [INFO] [clock-calendar] calendar shown
 ```
 
 ---
@@ -640,7 +672,7 @@ mplug.watch(topic, callback)
 ```
 
 Subscribe to a mango compositor `watch` topic. `callback` is invoked for each
-update mango emits — for most topics mango sends the current state on subscribe,
+update mango emits. For most topics mango sends the current state on subscribe,
 then an update on every change. `callback` receives the update parsed into a Lua
 table.
 
@@ -661,7 +693,7 @@ be cancelled. Lines that are not valid JSON are skipped. It is a no-op if the
 daemon is not running under mango (`MANGO_INSTANCE_SIGNATURE` unset).
 
 > For one-shot reads use `mplug.ipc_get("get …")`. Passing a `watch` command to
-> `ipc_get` is rejected — use `mplug.watch` instead.
+> `ipc_get` is rejected; use `mplug.watch` instead.
 
 ---
 
@@ -1132,7 +1164,7 @@ Modifies the focused window's tags using the bitmask formula `(current AND and_t
 
 Minimizes or restores the window with the given ID. The boolean argument is parsed as `true` or `1` for minimized, anything else for restored.
 
-Unknown commands are logged to stderr and ignored.
+Unknown commands are logged and ignored.
 
 ---
 
@@ -1143,16 +1175,35 @@ At daemon startup, the Lua thread performs the following steps for each plugin n
 1. Check for a single-file plugin at `~/.config/mplug/plugins/<name>.lua`. If found, load it directly.
 2. If no file exists, check for a directory at `~/.config/mplug/plugins/<name>/`.
    - If found, add `<plugin-dir>/?.lua` to Lua's `package.path` to enable `require()`.
-   - Load and validate `<plugin-dir>/mplug.toml`. If the manifest is missing or invalid, print a warning to stderr and skip this plugin.
+   - Load and validate `<plugin-dir>/mplug.toml`. If the manifest is missing or invalid, log a warning and skip this plugin.
    - Resolve the entry point as `<plugin-dir>/<entry_point>`.
 3. If neither a file nor directory exists, print a warning and skip.
 4. Read the entry point file and execute it in the shared Lua VM.
    - If reading fails, the plugin is silently skipped.
-   - If the Lua script raises an error at load time, the error is printed to stderr and the plugin is skipped; other plugins continue loading.
+   - If the Lua script raises an error at load time, the error is logged and the plugin is skipped; other plugins continue loading.
 
 All enabled plugins share a single Lua VM and the same global `mplug` table. Listeners registered by all plugins are stored in `mplug.__listeners` and are called for every event regardless of which plugin registered them.
 
 After all plugins are loaded, mplug also checks for a legacy `init.lua` in the current working directory and executes it if present. This behavior exists for compatibility and is not recommended for new plugins.
+
+---
+
+## Logging
+
+The daemon writes its own log file, with no init-system integration required, so it works the same under systemd, runit, dinit, or a bare compositor autostart.
+
+- **File:** `$XDG_STATE_HOME/mplug/mplug.log` (default `~/.local/state/mplug/mplug.log`). All log lines are also mirrored to stderr, so running `mplug daemon` in a foreground terminal behaves as before.
+- **Format:** `2026-06-11 13:53:41 [LEVEL] [component] message`. The component is `daemon`, `wayland`, `lua`, `socket`, `mango-ipc`, `events`, or a plugin name.
+- **Levels:** `error`, `warn`, `info` (default), `debug`. Set the `MPLUG_LOG` environment variable before starting the daemon to change it:
+
+  ```
+  MPLUG_LOG=debug mplug daemon
+  ```
+
+- **Debug level** additionally logs every event dispatched to plugins, e.g. `dispatch UserCommand("clock_calendar")`. This is the fastest way to tell whether a problem is in mplug (event never arrives) or in a plugin (event arrives but the plugin mishandles it). Event descriptions are truncated at 200 characters.
+- **Rotation:** at daemon startup, a log larger than 5 MB is renamed to `mplug.log.old` and a fresh file is started.
+
+Read the log with [`mplug log`](#mplug-log), or any standard tool (`tail -f ~/.local/state/mplug/mplug.log`).
 
 ---
 
@@ -1161,10 +1212,10 @@ After all plugins are loaded, mplug also checks for a legacy `init.lua` in the c
 mplug is designed to be resilient to plugin errors:
 
 - A plugin that fails to load does not prevent other plugins from loading.
-- A listener that raises a runtime error has the error printed to stderr; subsequent listeners and events continue to be processed.
+- A listener that raises a runtime error has the error logged (tagged with the plugin's chunk path); subsequent listeners and events continue to be processed.
 - An invalid manifest during `mplug add` results in a clean removal of the cloned directory.
 - An invalid config file at `~/.config/mplug/mplug.toml` is ignored and an empty default config is used.
-- Errors from Wayland requests (e.g., dispatching an unknown command) are logged to stderr and dropped.
+- Errors from Wayland requests (e.g., dispatching an unknown command) are logged and dropped.
 
 mplug does not restart crashed plugins automatically. If a plugin needs to maintain persistent state across multiple events, it should use Lua upvalues or module-level variables:
 

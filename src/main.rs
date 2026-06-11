@@ -14,6 +14,7 @@ pub mod dwl_ipc {
 
 pub mod config;
 pub mod event;
+pub mod logging;
 pub mod lua;
 pub mod mango_ipc;
 pub mod manifest;
@@ -80,6 +81,15 @@ enum Commands {
         after_help = "Examples:\n  mplug trigger battery\n  mplug trigger volume_up\n\nSends a UserCommand to the running daemon so enabled plugins can react to it. Bind these to keys in your compositor config."
     )]
     Trigger { name: String },
+    #[command(
+        after_help = "Examples:\n  mplug log\n  mplug log -n 200\n  mplug log -f\n\nShows the daemon log file (~/.local/state/mplug/mplug.log). Set MPLUG_LOG=debug before starting the daemon to also log every dispatched event."
+    )]
+    Log {
+        #[arg(short = 'n', long = "lines", default_value_t = 50)]
+        lines: usize,
+        #[arg(short = 'f', long = "follow")]
+        follow: bool,
+    },
 }
 
 fn main() -> std::process::ExitCode {
@@ -100,6 +110,8 @@ fn run() -> Result<()> {
 
     match &cli.command {
         Commands::Daemon => {
+            logging::init();
+
             let (event_tx, event_rx) = channel::<WaylandEvent>();
             let (req_tx, req_rx) = channel::<WaylandRequest>();
 
@@ -109,19 +121,19 @@ fn run() -> Result<()> {
             });
 
             if std::env::var("MANGO_INSTANCE_SIGNATURE").is_ok() {
-                println!("MangoWM signature found. Starting Mango IPC watch threads...");
+                log_info!("daemon", "MangoWM signature found. Starting Mango IPC watch threads...");
                 for topic in mango_ipc::WATCH_TOPICS {
                     mango_ipc::start_watch_thread(topic, event_tx_socket.clone());
                 }
             } else {
-                println!("MANGO_INSTANCE_SIGNATURE not set. Mango IPC watch threads skipped.");
+                log_info!("daemon", "MANGO_INSTANCE_SIGNATURE not set. Mango IPC watch threads skipped.");
             }
 
             let req_tx_socket = req_tx.clone();
             let event_tx_lua = event_tx_socket.clone();
             let lua_handle = thread::spawn(move || {
                 if let Err(e) = lua::run_lua(event_rx, req_tx, event_tx_lua) {
-                    eprintln!("Lua thread error: {}", e);
+                    log_error!("daemon", "Lua thread error: {}", e);
                 }
             });
 
@@ -141,6 +153,7 @@ fn run() -> Result<()> {
         Commands::Remove { name } => config::remove_plugin(name)?,
         Commands::Outdated => config::outdated_plugins()?,
         Commands::Trigger { name } => socket::send_command(&format!("trigger {name}"))?,
+        Commands::Log { lines, follow } => logging::show_log(*lines, *follow)?,
     }
     Ok(())
 }

@@ -101,7 +101,7 @@ impl TimerState {
         for entry in expired {
             if let Ok(f) = lua.registry_value::<mlua::Function>(&entry.cb_key) {
                 if let Err(e) = f.call::<(), ()>(()) {
-                    eprintln!("mplug: timer callback error: {e}");
+                    crate::log_error!("lua", "timer callback error: {e}");
                 }
             }
             let mut state = timers.borrow_mut();
@@ -251,6 +251,22 @@ pub fn run_lua(
     })?;
     mplug_table.set("after", after_fn)?;
 
+    let log_fn = lua.create_function(|lua_ctx, msg: String| {
+        let component = lua_ctx
+            .inspect_stack(1)
+            .and_then(|debug| {
+                debug
+                    .source()
+                    .source
+                    .map(|s| PathBuf::from(s.as_ref()).file_stem().map(|n| n.to_string_lossy().into_owned()))
+            })
+            .flatten()
+            .unwrap_or_else(|| "lua".to_string());
+        crate::log_info!(&component, "{}", msg);
+        Ok(())
+    })?;
+    mplug_table.set("log", log_fn)?;
+
     let listeners_table = lua.create_table()?;
     mplug_table.set("__listeners", listeners_table.clone())?;
 
@@ -306,10 +322,7 @@ pub fn run_lua(
                     }
                 }
             }
-            _ => eprintln!(
-                "mplug: unknown Wayland dispatch command from Lua: {}",
-                command
-            ),
+            _ => crate::log_error!("lua", "unknown Wayland dispatch command from Lua: {}", command),
         }
         Ok(())
     })?;
@@ -698,9 +711,11 @@ pub fn run_lua(
 
         let targets = config::resolve_load_targets(&plugins_dir, plugin_name);
         if targets.is_empty() {
-            eprintln!(
+            crate::log_error!(
+                "lua",
                 "Enabled plugin '{}' could not be loaded (not found, or no entry_point/collection in mplug.toml) in {:?}",
-                plugin_name, plugins_dir
+                plugin_name,
+                plugins_dir
             );
             continue;
         }
@@ -712,13 +727,13 @@ pub fn run_lua(
             }
             match fs::read_to_string(&target) {
                 Ok(script) => {
-                    println!("Loading plugin: {}", member);
+                    crate::log_info!("lua", "Loading plugin: {}", member);
                     let chunk_name = format!("@{}", target.display());
                     if let Err(e) = lua.load(&script).set_name(chunk_name).exec() {
-                        eprintln!("Plugin Error ({}): {}", member, e);
+                        crate::log_error!(&member, "load error: {}", e);
                     }
                 }
-                Err(e) => eprintln!("Plugin '{}' could not be read: {}", member, e),
+                Err(e) => crate::log_error!(&member, "could not be read: {}", e),
             }
         }
     }
@@ -730,7 +745,7 @@ pub fn run_lua(
         }
     }
 
-    println!("Lua Event Engine running...");
+    crate::log_info!("lua", "Lua Event Engine running...");
 
     let mut tag_count: u32 = 0;
     let mut layout_name = String::new();
@@ -764,6 +779,16 @@ pub fn run_lua(
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
 
+        if crate::logging::debug_enabled() {
+            let mut desc = format!("{:?}", event);
+            if desc.len() > 200 {
+                let cut = (0..=200).rev().find(|&i| desc.is_char_boundary(i)).unwrap_or(0);
+                desc.truncate(cut);
+                desc.push('…');
+            }
+            crate::log_debug!("events", "dispatch {}", desc);
+        }
+
         if let WaylandEvent::WatchUpdate { id, value } = &event {
             let cb = watch_callbacks
                 .borrow()
@@ -773,10 +798,10 @@ pub fn run_lua(
                 match json_to_lua(&lua, value) {
                     Ok(v) => {
                         if let Err(e) = f.call::<mlua::Value, ()>(v) {
-                            eprintln!("mplug: watch callback error: {e}");
+                            crate::log_error!("lua", "watch callback error: {e}");
                         }
                     }
-                    Err(e) => eprintln!("mplug: watch json convert error: {e}"),
+                    Err(e) => crate::log_error!("lua", "watch json convert error: {e}"),
                 }
             }
             TimerState::fire_expired(&timers, &lua);
@@ -793,145 +818,145 @@ pub fn run_lua(
                 focused,
             } => {
                 if let Err(e) = lua_event_table.set("type", "OutputTag") {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("tag", *tag) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("state", *state) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("clients", *clients) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("focused", *focused) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
             }
             WaylandEvent::TagsAmount(amount) => {
                 if let Err(e) = lua_event_table.set("type", "TagsAmount") {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("amount", *amount) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
             }
             WaylandEvent::LayoutName(name) => {
                 if let Err(e) = lua_event_table.set("type", "LayoutName") {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("name", name.clone()) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
             }
             WaylandEvent::OutputLayout(layout) => {
                 if let Err(e) = lua_event_table.set("type", "OutputLayout") {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("layout", *layout) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
             }
             WaylandEvent::ToplevelUpdated { id, info } => {
                 if let Err(e) = lua_event_table.set("type", "ToplevelUpdated") {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("id", *id) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("title", info.title.clone()) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("app_id", info.app_id.clone()) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("activated", info.activated) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("minimized", info.minimized) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("maximized", info.maximized) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("fullscreen", info.fullscreen) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
             }
             WaylandEvent::ToplevelClosed { id } => {
                 if let Err(e) = lua_event_table.set("type", "ToplevelClosed") {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("id", *id) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
             }
             WaylandEvent::WorkspaceUpdated { id, info } => {
                 if let Err(e) = lua_event_table.set("type", "WorkspaceUpdated") {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("id", *id) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("name", info.name.clone()) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("active", info.active) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("urgent", info.urgent) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("hidden", info.hidden) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
             }
             WaylandEvent::WorkspaceClosed { id } => {
                 if let Err(e) = lua_event_table.set("type", "WorkspaceClosed") {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("id", *id) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
             }
             WaylandEvent::OutputHeadUpdated { id, info } => {
                 if let Err(e) = lua_event_table.set("type", "OutputHeadUpdated") {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("id", *id) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("name", info.name.clone()) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("enabled", info.enabled) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("width_px", info.width_px) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("height_px", info.height_px) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("refresh", info.refresh) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("scale", info.scale) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("x", info.x) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("y", info.y) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
             }
             WaylandEvent::OutputHeadRemoved { id } => {
                 if let Err(e) = lua_event_table.set("type", "OutputHeadRemoved") {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("id", *id) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
             }
             WaylandEvent::LayerSurfaceConfigured { id, width, height } => {
@@ -962,20 +987,20 @@ pub fn run_lua(
             }
             WaylandEvent::Idled => {
                 if let Err(e) = lua_event_table.set("type", "Idled") {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
             }
             WaylandEvent::IdleResumed => {
                 if let Err(e) = lua_event_table.set("type", "IdleResumed") {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
             }
             WaylandEvent::OutputPowerMode { on } => {
                 if let Err(e) = lua_event_table.set("type", "OutputPowerMode") {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
                 if let Err(e) = lua_event_table.set("on", *on) {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
             }
             WaylandEvent::IpcKeyMode(mode) => {
@@ -1006,7 +1031,7 @@ pub fn run_lua(
             }
             _ => {
                 if let Err(e) = lua_event_table.set("type", "Generic") {
-                    eprintln!("mplug: failed to set event field: {e}");
+                    crate::log_error!("lua", "failed to set event field: {e}");
                 }
             }
         }
@@ -1072,7 +1097,7 @@ pub fn run_lua(
                     let _ = surface_cbs.set(*id, mlua::Value::Nil);
 
                     match lua.create_table() {
-                        Err(e) => eprintln!("mplug: failed to create surface table: {e}"),
+                        Err(e) => crate::log_error!("lua", "failed to create surface table: {e}"),
                         Ok(surface_tbl) => {
                             let _ = surface_tbl.set("id", *id);
 
@@ -1093,7 +1118,7 @@ pub fn run_lua(
                                 Ok(f) => {
                                     let _ = surface_tbl.set("fill", f);
                                 }
-                                Err(e) => eprintln!("mplug: failed to create fill fn: {e}"),
+                                Err(e) => crate::log_error!("lua", "failed to create fill fn: {e}"),
                             }
 
                             let sid = *id;
@@ -1106,11 +1131,11 @@ pub fn run_lua(
                                 Ok(f) => {
                                     let _ = surface_tbl.set("destroy", f);
                                 }
-                                Err(e) => eprintln!("mplug: failed to create destroy fn: {e}"),
+                                Err(e) => crate::log_error!("lua", "failed to create destroy fn: {e}"),
                             }
 
                             if let Err(e) = cb.call::<mlua::Table, ()>(surface_tbl) {
-                                eprintln!("mplug: layer surface callback error: {e}");
+                                crate::log_error!("lua", "layer surface callback error: {e}");
                             }
                         }
                     }
@@ -1144,7 +1169,7 @@ pub fn run_lua(
                         None => mlua::Value::Nil,
                     };
                     if let Err(e) = f.call::<mlua::Value, ()>(code_val) {
-                        eprintln!("mplug: process on_exit error: {e}");
+                        crate::log_error!("lua", "process on_exit error: {e}");
                     }
                 }
 
@@ -1161,7 +1186,7 @@ pub fn run_lua(
                 };
                 if let Some(f) = f {
                     if let Err(e) = f.call::<String, ()>(line.clone()) {
-                        eprintln!("mplug: process on_stdout error: {e}");
+                        crate::log_error!("lua", "process on_stdout error: {e}");
                     }
                 }
             }
@@ -1300,7 +1325,7 @@ pub fn run_lua(
                     lua_event_table.clone(),
                     state_table.clone(),
                 )) {
-                    eprintln!("mplug: plugin listener error: {e}");
+                    crate::log_error!("lua", "plugin listener error: {e}");
                 }
             }
         }
